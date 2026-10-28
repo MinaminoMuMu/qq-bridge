@@ -10905,6 +10905,18 @@ async function main() {
     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
     const roleState = readRoleState();
 
+    // 忽略前缀：例如 SnowLuma 自带的 `#sl` 状态命令。这类消息不属于对话，
+    // 直接丢掉，既不入库也不唤醒模型（否则模型会对着 `#sl` 回一句“这是啥”）。
+    // 配置：config.json 的 ignorePrefixes（默认 ["#"]，设为 [] 即关闭本过滤）。
+    const ignorePrefixes = Array.isArray(cfg.ignorePrefixes)
+      ? cfg.ignorePrefixes.map((x) => String(x ?? '')).filter(Boolean)
+      : ['#'];
+    if (ignorePrefixes.length > 0 && ignorePrefixes.some((prefix) => plainContent.startsWith(prefix))) {
+      appendActivity(`${key} 已按 ignorePrefixes 忽略：${textContent.slice(0, 60)}`);
+      log(`忽略前缀消息 ${key}：${textContent.slice(0, 40)}`);
+      return;
+    }
+
     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
     const p = pending.get(key);
