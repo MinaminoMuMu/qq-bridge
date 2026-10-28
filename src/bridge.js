@@ -2913,6 +2913,13 @@ async function main() {
           }
           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
         }
+        // 峰谷补发（启动）：上次在峰谷静默里攒下的未读，如果现在不在静默期，
+        // 起来后主动补一次唤醒；否则只能等下一次开关或下一条消息才补。
+        setTimeout(() => {
+          try {
+            if (currentMode === 'reserved2' && cfg.socialV2?.peakQuiet !== true) flushPeakBacklog('startup');
+          } catch (error) { log(`峰谷补发（启动）失败：${error?.message ?? error}`); }
+        }, 8000).unref?.();
         try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
         // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
         for (const key of [...slangWindows.keys()]) maybeQueueSlangExtraction(key);
@@ -4545,6 +4552,10 @@ async function main() {
           file.socialV2 = merged;
           atomicWriteJson(configFile, file);
           cfg.socialV2 = { ...(cfg.socialV2 ?? {}), ...merged };
+          // 峰谷静默开关（只拦截群聊/他人会话的唤醒；管理员私聊不受影响）
+          if (merged.peakQuiet !== undefined) merged.peakQuiet = merged.peakQuiet === true;
+          // 由「开」变「关」时，把静默期间只入库的未读补唤醒一次（排队补发）
+          if (body.peakQuiet === false) flushPeakBacklog('config');
           // 仅当“会影响默认唤醒配置”的字段变化时，才同步到仍使用默认配置的现有会话。
           // 避免只改发送/等待/工具开关时，意外重置正在等待的潜水/唤醒计划。
           const WAKE_DEFAULT_KEYS = [
@@ -8050,6 +8061,36 @@ async function main() {
     return roleState.mode === 'silent' && key !== `private:${String(cfg.ownerQQ ?? '')}`;
   }
 
+  // ── 峰谷静默（socialV2.peakQuiet，DeepSeek 高峰时段省钱）──────────────────
+  // 只冻结「群聊 / 他人会话」的唤醒：消息照常入库成为未读，但不投给模型；
+  // 管理员私聊完全不受影响（否则会把自己也锁在门外）。
+  // 由外部守护（qq-peak-switch.mjs）按桥接自己的峰谷价目表开关；
+  // 关闭时会 flushPeakBacklog 把静默期间堆积的未读补唤醒一次（排队补发）。
+  function isOwnerPrivateKey(key) {
+    return !!cfg.ownerQQ && key === `private:${cfg.ownerQQ}`;
+  }
+  function isPeakQuietForKey(key) {
+    return cfg.socialV2?.peakQuiet === true && !isOwnerPrivateKey(key);
+  }
+  function flushPeakBacklog(source) {
+    if (currentMode !== 'reserved2' || socialV2.paused) return 0;
+    let n = 0;
+    for (const [key, st] of socialV2.conversations) {
+      try {
+        if (!st || !Array.isArray(st.unread) || st.unread.length === 0) continue;
+        if (isOwnerPrivateKey(key)) continue;
+        if (!isSessionAllowedInCurrentMode(key)) continue;
+        if (isConversationBusyV2(key, st)) continue;
+        scheduleWakeV2(key, `peak-backlog:${source}`);
+        n += 1;
+      } catch (error) {
+        log(`[reserved2] 峰谷补发失败 ${key}：${error?.message ?? error}`);
+      }
+    }
+    if (n > 0) log(`[reserved2] 峰谷静默结束：已为 ${n} 个会话安排补发唤醒`);
+    return n;
+  }
+
   // 统一出站消息：先完整文本审计，再发送。返回是否真的发出。
   async function auditAndSend(key, text) {
     const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && String(text ?? '').includes(t));
@@ -10380,6 +10421,10 @@ async function main() {
   async function sendWakePromptV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
+    if (isPeakQuietForKey(key)) {
+      log(`[reserved2] 峰谷静默：本次不唤醒 ${key}（${reason}），消息留在未读等补发`);
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
       return;
@@ -10597,6 +10642,10 @@ async function main() {
   function scheduleWakeV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused) return;
+    if (isPeakQuietForKey(key)) {
+      log(`[reserved2] 峰谷静默：本次不唤醒 ${key}（${reason}），消息留在未读等补发`);
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过计划唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
       return;
@@ -11670,7 +11719,15 @@ async function main() {
                 }
               } else if (ended.reason.kind === 'error') {
                 const msg = ended.reason.error?.message ?? '未知错误';
-                const safeMsg = shouldAuditKey(key) && SENSITIVE_RE.test(msg) ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
+                const redacted = shouldAuditKey(key) && SENSITIVE_RE.test(msg);
+                const safeMsg = redacted ? '（含敏感信息，已隐藏）' : msg.slice(0, 500);
+                // 脱敏会让 QQ 和 bridge.log 都看不到原因。原始错误只落本地文件，绝不外发。
+                if (redacted) {
+                  try {
+                    fs.appendFileSync(path.join(STATE_DIR, 'error-raw.log'),
+                      `[${new Date().toISOString()}] ${key} ${String(msg).slice(0, 2000)}\n`, 'utf8');
+                  } catch {}
+                }
                 // 以前这里只发 QQ、不写日志：出问题时 bridge.log 里什么都没有，排查只能靠猜（PR #24）。
                 log(`⚠️ agent 处理出错 (${key})：${safeMsg}`);
                 appendActivity(`${key} agent 处理出错：${safeMsg.slice(0, 80)}`);
