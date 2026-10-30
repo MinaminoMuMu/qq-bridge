@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
+import { shouldPeakQuiet } from './peak-policy.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage, describeAge } from './qq-model-view.js';
@@ -8063,14 +8064,19 @@ async function main() {
 
   // ── 峰谷静默（socialV2.peakQuiet，DeepSeek 高峰时段省钱）──────────────────
   // 只冻结「群聊 / 他人会话」的唤醒：消息照常入库成为未读，但不投给模型；
-  // 管理员私聊完全不受影响（否则会把自己也锁在门外）。
+  // 管理员私聊：只拦定时唤醒（proactiveCheck/timeout/replyCheck/bootstrap），
+  // 主人主动发消息仍可叫醒（方案 A，见 src/peak-policy.js）。
   // 由外部守护（qq-peak-switch.mjs）按桥接自己的峰谷价目表开关；
   // 关闭时会 flushPeakBacklog 把静默期间堆积的未读补唤醒一次（排队补发）。
   function isOwnerPrivateKey(key) {
     return !!cfg.ownerQQ && key === `private:${cfg.ownerQQ}`;
   }
-  function isPeakQuietForKey(key) {
-    return cfg.socialV2?.peakQuiet === true && !isOwnerPrivateKey(key);
+  function isPeakQuietForKey(key, reason = null) {
+    return shouldPeakQuiet({
+      peakQuiet: cfg.socialV2?.peakQuiet === true,
+      ownerPrivate: isOwnerPrivateKey(key),
+      reason
+    });
   }
   function flushPeakBacklog(source) {
     if (currentMode !== 'reserved2' || socialV2.paused) return 0;
@@ -10421,7 +10427,7 @@ async function main() {
   async function sendWakePromptV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
-    if (isPeakQuietForKey(key)) {
+    if (isPeakQuietForKey(key, reason)) {
       log(`[reserved2] 峰谷静默：本次不唤醒 ${key}（${reason}），消息留在未读等补发`);
       return;
     }
@@ -10642,7 +10648,7 @@ async function main() {
   function scheduleWakeV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (socialV2.paused) return;
-    if (isPeakQuietForKey(key)) {
+    if (isPeakQuietForKey(key, reason)) {
       log(`[reserved2] 峰谷静默：本次不唤醒 ${key}（${reason}），消息留在未读等补发`);
       return;
     }
