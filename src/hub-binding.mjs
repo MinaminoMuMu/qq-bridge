@@ -58,20 +58,34 @@ export function deriveHubBinding(event, cfg = {}, sessionId = '') {
   };
 }
 
-function validEntry(entry) {
+function validExistingEntry(entry) {
   return entry && typeof entry === 'object' && !Array.isArray(entry)
     && typeof entry.agent_id === 'string' && entry.agent_id.length > 0
     && typeof entry.source === 'string' && entry.source.length > 0
     && typeof entry.connector_account === 'string' && entry.connector_account.length > 0
-    && typeof entry.context_key === 'string' && /^(?:group|private):\d+$/.test(entry.context_key)
+    && typeof entry.context_key === 'string' && entry.context_key.length > 0
     && typeof entry.person_id === 'string' && entry.person_id.length > 0;
+}
+
+function validNewBinding(entry) {
+  return validExistingEntry(entry) && /^(?:group|private):\d+$/.test(entry.context_key);
+}
+
+function canonicalBinding(entry) {
+  return {
+    agent_id: entry.agent_id,
+    source: entry.source,
+    connector_account: entry.connector_account,
+    context_key: entry.context_key,
+    person_id: entry.person_id
+  };
 }
 
 function sanitizeMap(raw) {
   const clean = {};
   let dropped = 0;
   for (const [sessionId, entry] of Object.entries(raw)) {
-    if (!validEntry(entry)) { dropped++; continue; }
+    if (!validExistingEntry(entry)) { dropped++; continue; }
     clean[sessionId] = entry;
   }
   return { map: clean, dropped };
@@ -113,13 +127,13 @@ function parseExisting(file) {
 }
 
 export function writeHubBinding(dataDir, sessionId, binding) {
-  if (!dataDir || !sessionId || !validEntry(binding)) return { ok: false, code: 'invalid_argument' };
+  if (!dataDir || !sessionId || !validNewBinding(binding)) return { ok: false, code: 'invalid_argument' };
   if (!path.isAbsolute(dataDir)) return { ok: false, code: 'invalid_data_dir' };
   const dir = path.resolve(dataDir);
   const file = path.join(dir, 'bindings.json');
   const existing = parseExisting(file);
   if (!existing.ok) return existing;
-  const map = { ...existing.map, [sessionId]: binding };
+  const map = { ...existing.map, [sessionId]: canonicalBinding(binding) };
   fs.mkdirSync(dir, { recursive: true });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(map, null, 2), 'utf8');

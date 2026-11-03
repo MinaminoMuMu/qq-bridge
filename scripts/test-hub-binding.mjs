@@ -73,6 +73,57 @@ test('hub binding: v1 map shape, preservation and fail-closed corruption', () =>
   }
 });
 
+test('hub binding: Hub-valid non-QQ existing entries and extra fields survive unchanged', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'bindings.json');
+  try {
+    const existing = {
+      slack: {
+        agent_id: 'a', source: 'slack', connector_account: 'workspace',
+        context_key: 'slack:workspace:channel', person_id: 'u-1', extra_legacy: 'keep-me'
+      }
+    };
+    fs.writeFileSync(file, JSON.stringify(existing));
+    const out = writeHubBinding(dir, 'qq-session', {
+      agent_id: 'dsh:qq-agent', source: 'qq', connector_account: 'bot-1',
+      context_key: 'private:20002', person_id: '20002'
+    });
+    assert.equal(out.ok, true);
+    const map = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(map.slack, existing.slack);
+    assert.deepEqual(map['qq-session'], {
+      agent_id: 'dsh:qq-agent', source: 'qq', connector_account: 'bot-1',
+      context_key: 'private:20002', person_id: '20002'
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('hub binding: v2-read existing non-QQ entry survives; new binding is canonicalized', () => {
+  const dir = tmp();
+  const file = path.join(dir, 'bindings.json');
+  try {
+    const existing = {
+      slack: {
+        agent_id: 'a', source: 'slack', connector_account: 'workspace',
+        context_key: 'slack:workspace:channel', person_id: 'u-1'
+      }
+    };
+    fs.writeFileSync(file, JSON.stringify({ schema_version: 2, bindings: existing }));
+    const out = writeHubBinding(dir, 'qq-session', {
+      agent_id: 'dsh:qq-agent', source: 'qq', connector_account: 'bot-1',
+      context_key: 'group:30003', person_id: '20002', extra: 'must-not-persist'
+    });
+    assert.equal(out.ok, true);
+    const map = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(map.slack, existing.slack);
+    assert.deepEqual(map['qq-session'], {
+      agent_id: 'dsh:qq-agent', source: 'qq', connector_account: 'bot-1',
+      context_key: 'group:30003', person_id: '20002'
+    });
+    assert.equal('extra' in map['qq-session'], false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('hub binding: valid v2 is read-updated and written as v1', () => {
   const dir = tmp();
   const file = path.join(dir, 'bindings.json');
@@ -97,14 +148,16 @@ test('hub binding: malformed v2/entry/schema cases fail closed or drop invalid e
   const file = path.join(dir, 'bindings.json');
   const good = { agent_id: 'a', source: 'qq', connector_account: 'b', context_key: 'private:1', person_id: '1' };
   try {
-    fs.writeFileSync(file, JSON.stringify({ schema_version: 2, bindings: [] }));
-    assert.equal(writeHubBinding(dir, 's', good).code, 'corrupt_shape');
-
-    fs.writeFileSync(file, JSON.stringify({ schema_version: 3, bindings: {} }));
-    assert.equal(writeHubBinding(dir, 's', good).code, 'unsupported_schema');
-
-    fs.writeFileSync(file, JSON.stringify([]));
-    assert.equal(writeHubBinding(dir, 's', good).code, 'corrupt_shape');
+    const cases = [
+      { raw: JSON.stringify({ schema_version: 2, bindings: [] }), code: 'corrupt_shape' },
+      { raw: JSON.stringify({ schema_version: 3, bindings: {} }), code: 'unsupported_schema' },
+      { raw: JSON.stringify([]), code: 'corrupt_shape' }
+    ];
+    for (const c of cases) {
+      fs.writeFileSync(file, c.raw);
+      assert.equal(writeHubBinding(dir, 's', good).code, c.code);
+      assert.equal(fs.readFileSync(file, 'utf8'), c.raw);
+    }
 
     fs.writeFileSync(file, JSON.stringify({ old: good, bad: { agent_id: 'a' } }));
     const out = writeHubBinding(dir, 'session-3', good);
