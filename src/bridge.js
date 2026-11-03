@@ -30,6 +30,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+import { applyHubBinding } from './hub-binding.mjs';
 import {
   loadSlang,
   saveSlang,
@@ -11186,6 +11187,12 @@ async function main() {
         return;
       }
       throw error;
+    }
+    try {
+      const hubBinding = applyHubBinding(event, cfg, sessionId);
+      log(`[hub-binding] ${hubBinding.ok ? 'written' : 'skipped:' + hubBinding.code}`);
+    } catch {
+      log('[hub-binding] skipped:unexpected_error');
     }
     let content = [{ type: 'text', text: withSlangContext(promptText) }];
     if (Array.isArray(mediaList) && mediaList.length > 0) {
