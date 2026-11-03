@@ -58,12 +58,31 @@ export function deriveHubBinding(event, cfg = {}, sessionId = '') {
   };
 }
 
+function validEntry(entry) {
+  return entry && typeof entry === 'object' && !Array.isArray(entry)
+    && typeof entry.agent_id === 'string' && entry.agent_id.length > 0
+    && typeof entry.source === 'string' && entry.source.length > 0
+    && typeof entry.connector_account === 'string' && entry.connector_account.length > 0
+    && typeof entry.context_key === 'string' && /^(?:group|private):\d+$/.test(entry.context_key)
+    && typeof entry.person_id === 'string' && entry.person_id.length > 0;
+}
+
+function sanitizeMap(raw) {
+  const clean = {};
+  let dropped = 0;
+  for (const [sessionId, entry] of Object.entries(raw)) {
+    if (!validEntry(entry)) { dropped++; continue; }
+    clean[sessionId] = entry;
+  }
+  return { map: clean, dropped };
+}
+
 function parseExisting(file) {
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (e) {
-    if (e?.code === 'ENOENT') return { ok: true, map: {} };
+    if (e?.code === 'ENOENT') return { ok: true, map: {}, version: 0, dropped: 0 };
     return { ok: false, code: 'read_failed' };
   }
   let parsed;
@@ -75,16 +94,28 @@ function parseExisting(file) {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { ok: false, code: 'corrupt_shape' };
   }
+
+  let map = parsed;
+  let version = 1;
   if (Object.prototype.hasOwnProperty.call(parsed, 'schema_version')) {
-    return { ok: false, code: 'unsupported_schema' };
+    const v = parsed.schema_version;
+    if (!Number.isInteger(v) || v < 1) return { ok: false, code: 'corrupt_shape' };
+    if (v !== 2) return { ok: false, code: 'unsupported_schema', version: v };
+    const body = parsed.bindings;
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return { ok: false, code: 'corrupt_shape', version: v };
+    }
+    map = body;
+    version = 2;
   }
-  return { ok: true, map: parsed };
+  const clean = sanitizeMap(map);
+  return { ok: true, map: clean.map, version, dropped: clean.dropped };
 }
 
 export function writeHubBinding(dataDir, sessionId, binding) {
-  if (!dataDir || !sessionId || !binding) return { ok: false, code: 'invalid_argument' };
+  if (!dataDir || !sessionId || !validEntry(binding)) return { ok: false, code: 'invalid_argument' };
+  if (!path.isAbsolute(dataDir)) return { ok: false, code: 'invalid_data_dir' };
   const dir = path.resolve(dataDir);
-  if (!path.isAbsolute(dir)) return { ok: false, code: 'invalid_data_dir' };
   const file = path.join(dir, 'bindings.json');
   const existing = parseExisting(file);
   if (!existing.ok) return existing;
@@ -93,7 +124,13 @@ export function writeHubBinding(dataDir, sessionId, binding) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(map, null, 2), 'utf8');
   fs.renameSync(tmp, file);
-  return { ok: true, code: 'written', path: file };
+  return { ok: true, code: 'written', path: file, version: 1 };
+}
+
+function samePath(a, b) {
+  const ra = path.resolve(a);
+  const rb = path.resolve(b);
+  return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
 }
 
 export function applyHubBinding(event, cfg, sessionId) {
@@ -102,8 +139,7 @@ export function applyHubBinding(event, cfg, sessionId) {
   const dataDir = String(cfg?.personaHub?.dataDir ?? '');
   const pluginDataDir = String(process.env.PERSONA_HUB_DATA ?? '');
   if (!dataDir || !path.isAbsolute(dataDir)) return fail('missing_or_invalid_data_dir');
-
-  if (!pluginDataDir || path.resolve(dataDir) !== path.resolve(pluginDataDir)) {
+  if (!pluginDataDir || !samePath(dataDir, pluginDataDir)) {
     return fail('data_dir_mismatch');
   }
   return writeHubBinding(dataDir, sessionId, derived.binding);
