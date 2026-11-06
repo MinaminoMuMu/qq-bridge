@@ -11894,9 +11894,24 @@ async function main() {
   }
 
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）
+  // SnowLuma 每个账号的 HTTP token 与 WS token 不同：config.json 里的 accessToken 是 HTTP token，
+  // 直接拿它连 3001 会被拒绝（1006）。构造 WS 客户端前先自发现一次，用发现的 wsToken/wsUrl；
+  // HTTP 调用仍使用 cfg.snowluma.accessToken。
+  let initialDiscovery = null;
+  try {
+    initialDiscovery = await discoverSnowLumaConnection({ cfg, timeoutMs: 4000 });
+  } catch (error) {
+    log('SnowLuma 初始发现失败（继续用 config 值）：', error?.message ?? error);
+  }
+  const initialWsUrl = (initialDiscovery && initialDiscovery.ok && initialDiscovery.wsUrl)
+    ? initialDiscovery.wsUrl
+    : cfg.snowluma.wsUrl;
+  const initialWsToken = (initialDiscovery && initialDiscovery.ok && initialDiscovery.wsToken)
+    ? initialDiscovery.wsToken
+    : (cfg.snowluma.accessToken || undefined);
   const bot = new SnowLumaWebSocketClient({
-    url: cfg.snowluma.wsUrl,
-    accessToken: cfg.snowluma.accessToken || undefined,
+    url: initialWsUrl,
+    accessToken: initialWsToken,
     reconnect: true
   });
 
