@@ -11915,6 +11915,8 @@ async function main() {
     accessToken: initialWsToken,
     reconnect: true
   });
+  // R3 debug: confirm which URL/token the WS client was constructed with (prefix only, never the full token).
+  log(`[r3-debug] ws-url=${bot.url} token=${String(bot.accessToken || '').slice(0, 4)}… len=${String(bot.accessToken || '').length} discoveryOk=${!!(initialDiscovery && initialDiscovery.ok)}`);
 
   bot.onPrivateMessage(async (event) => {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
