@@ -11903,12 +11903,13 @@ async function main() {
   } catch (error) {
     log('SnowLuma 初始发现失败（继续用 config 值）：', error?.message ?? error);
   }
-  const initialWsUrl = (initialDiscovery && initialDiscovery.ok && initialDiscovery.wsUrl)
-    ? initialDiscovery.wsUrl
-    : cfg.snowluma.wsUrl;
-  const initialWsToken = (initialDiscovery && initialDiscovery.ok && initialDiscovery.wsToken)
-    ? initialDiscovery.wsToken
-    : (cfg.snowluma.accessToken || undefined);
+  const initialWsUrl = cfg.snowluma.wsUrl;
+  // 显式配置的 wsToken 优先：发现逻辑在 QQ 身份下可能读不到 SnowLuma 配置目录（被隔离），
+  // 会把 HTTP token 当成 WS token 回退，必须避免。
+  const initialWsToken = cfg.snowluma.wsToken
+    || ((initialDiscovery && initialDiscovery.ok && initialDiscovery.wsToken) ? initialDiscovery.wsToken : undefined)
+    || cfg.snowluma.accessToken
+    || undefined;
   const bot = new SnowLumaWebSocketClient({
     url: initialWsUrl,
     accessToken: initialWsToken,
